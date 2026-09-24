@@ -101,6 +101,61 @@ final class ArchiveTest extends TestCase {
 		$this->assertSame( 'Thanks for buying.', $this->open()->getFromName( 'readme.txt' ) );
 	}
 
+	/**
+	 * A second readme would overwrite the first on extraction.
+	 */
+	public function test_a_repeated_name_gets_a_number_before_its_extension(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( 'readme.txt', 'one' );
+		$second = $zip->add_string( 'readme.txt', 'two' );
+		$zip->add_string( 'readme.txt', 'three' );
+		$zip->finish();
+
+		$opened = $this->open();
+
+		$this->assertSame( 'readme (2).txt', $second->name );
+		$this->assertSame( 3, $opened->numFiles );
+		$this->assertSame( 'one', $opened->getFromName( 'readme.txt' ) );
+		$this->assertSame( 'three', $opened->getFromName( 'readme (3).txt' ) );
+	}
+
+	/**
+	 * macOS and Windows extract onto file systems that ignore case.
+	 */
+	public function test_names_differing_only_in_case_are_the_same_name(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( 'Master.wav', 'a' );
+
+		$this->assertSame( 'master (2).wav', $zip->add_string( 'master.wav', 'b' )->name );
+	}
+
+	public function test_numbering_keeps_the_directory_and_leaves_dotfiles_whole(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( 'stems/kick.wav', 'a' );
+		$zip->add_string( '.env', 'a' );
+		$zip->add_string( 'LICENSE', 'a' );
+
+		$this->assertSame( 'stems/kick (2).wav', $zip->add_string( 'stems/kick.wav', 'b' )->name );
+		$this->assertSame( '.env (2)', $zip->add_string( '.env', 'b' )->name );
+		$this->assertSame( 'LICENSE (2)', $zip->add_string( 'LICENSE', 'b' )->name );
+		$this->assertSame( 'kick.wav', $zip->add_string( 'kick.wav', 'c' )->name, 'Another directory is another name.' );
+	}
+
+	/**
+	 * A seller who uploaded "song (2).mp3" next to "song.mp3" twice.
+	 */
+	public function test_a_number_already_taken_is_skipped(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( 'song.mp3', 'a' );
+		$zip->add_string( 'song (2).mp3', 'b' );
+
+		$this->assertSame( 'song (3).mp3', $zip->add_string( 'song.mp3', 'c' )->name );
+	}
+
 	public function test_directories_come_from_slashes_in_the_name(): void {
 		$zip = $this->archive();
 

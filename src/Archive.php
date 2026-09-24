@@ -63,6 +63,13 @@ final class Archive {
 	private array $entries = array();
 
 	/**
+	 * Names already written, lower-cased, as keys.
+	 *
+	 * @var array<string, true>
+	 */
+	private array $names = array();
+
+	/**
 	 * Bytes sent, which is also the offset of whatever comes next.
 	 */
 	private int $offset = 0;
@@ -86,7 +93,8 @@ final class Archive {
 	 * @since 1.0.0
 	 *
 	 * @param string   $name   Path inside the archive. Directories are made
-	 *                         by putting a slash in it.
+	 *                         by putting a slash in it. A name already used
+	 *                         gets a number — see unused().
 	 * @param resource $handle Anything fread() accepts. Closed by the caller.
 	 * @param int|null $time   Modification time. Null uses the clock.
 	 * @param int      $expect Size if it is known, which only decides whether
@@ -102,7 +110,7 @@ final class Archive {
 			throw new \LogicException( 'Cannot add to an archive that has been finished.' );
 		}
 
-		$name  = self::clean( $name );
+		$name  = $this->unused( self::clean( $name ) );
 		$time ??= time();
 
 		// Decided before the header, because it changes the header. A member
@@ -380,6 +388,43 @@ final class Archive {
 			( $parts['hours'] << 11 ) | ( $parts['minutes'] << 5 ) | ( $parts['seconds'] >> 1 ),
 			( ( $parts['year'] - 1980 ) << 9 ) | ( $parts['mon'] << 5 ) | $parts['mday']
 		);
+	}
+
+	/**
+	 * The name, or the first numbered variant of it not yet written.
+	 *
+	 * Two members with one name make an archive that loses a file on
+	 * extraction — the second overwrites the first, or the extractor stops
+	 * to ask. Compared without case, because macOS and Windows extract to
+	 * file systems where `Readme.txt` and `readme.txt` are the same file.
+	 *
+	 * The number goes before the extension, the way a desktop names a
+	 * second copy: `readme (2).txt`, `stems/kick (3).wav`.
+	 *
+	 * @param string $name Cleaned name.
+	 *
+	 * @return string
+	 */
+	private function unused( string $name ): string {
+		$slash     = strrpos( $name, '/' );
+		$directory = false === $slash ? '' : substr( $name, 0, $slash + 1 );
+		$file      = false === $slash ? $name : substr( $name, $slash + 1 );
+
+		// After the first character, so a dotfile is all name and no
+		// extension: `.env (2)`, not ` (2).env`.
+		$dot       = strrpos( $file, '.', 1 );
+		$base      = false === $dot || 0 === $dot ? $file : substr( $file, 0, $dot );
+		$extension = false === $dot || 0 === $dot ? '' : substr( $file, $dot );
+
+		$candidate = $name;
+
+		for ( $copy = 2; isset( $this->names[ mb_strtolower( $candidate ) ] ); $copy++ ) {
+			$candidate = $directory . $base . ' (' . $copy . ')' . $extension;
+		}
+
+		$this->names[ mb_strtolower( $candidate ) ] = true;
+
+		return $candidate;
 	}
 
 	/**

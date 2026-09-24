@@ -1,6 +1,6 @@
 {
   "name": "sugarcommerce/zip-stream",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Write a ZIP straight to the client without building it first. Members are streamed through, so a 40 GB archive costs a buffer rather than disk, and ZIP64 turns on by itself when the numbers need it.",
   "type": "library",
   "license": "GPL-2.0-or-later",

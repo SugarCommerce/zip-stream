@@ -66,6 +66,12 @@ checking, and plenty does.
 Names are written as UTF-8 with the flag that says so, so `Café — Master.wav`
 survives the round trip.
 
+A name that is already in the archive gets a number before its extension —
+`readme.txt`, `readme (2).txt` — rather than a second entry that overwrites
+the first on extraction. The comparison ignores case, because macOS and
+Windows extract to file systems where `Readme.txt` and `readme.txt` are one
+file. `add()` returns the Entry, whose `name` is what was actually written.
+
 ## Timestamps
 
 The format stores local wall-clock time with no zone, from MS-DOS, with
