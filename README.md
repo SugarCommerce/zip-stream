@@ -27,6 +27,31 @@ forty gigabytes of disk, and the first byte reaches the client before the last
 member has been read — which is the difference between a download that starts
 and a request that times out while a temporary file is assembled.
 
+## Pushing bytes in
+
+`add()` reads a handle to the end. When a member *arrives* instead — an HTTP
+response handed over chunk by chunk — push it:
+
+```php
+$zip->begin( 'master.wav', expect: $size );
+
+$response = $http->stream( $url, static fn( string $chunk ) => $zip->write( $chunk ) );
+
+$entry = $zip->end();   // closed properly even if the transfer stopped early
+```
+
+This is how to put a remote file in an archive *safely*. Opening the URL with
+`fopen()` and passing the handle to `add()` looks equivalent, but PHP's stream
+wrapper cannot be told which address to connect to: whatever checked the URL
+first, the connection goes wherever DNS says the second time. Fetch it with a
+client that pins the connection (`sugarcommerce/http-client`'s `stream()`) and
+push the bytes here.
+
+One member is open at a time: `begin()` while another is open, `write()` or
+`end()` with none, and `finish()` with one still open all throw a
+`LogicException`. `add()` is `begin()`, `write()` per chunk, `end()`, so the
+two ways produce identical bytes.
+
 ## What it does not do
 
 **It does not compress.** Everything anybody streams this way — audio, video,
@@ -78,3 +103,15 @@ The format stores local wall-clock time with no zone, from MS-DOS, with
 two-second resolution. That is not a choice — it is what the field is. Anything
 before 1980 is clamped, because a negative year produces an archive that will
 not open.
+
+## Testing
+
+```bash
+composer install
+composer test
+```
+
+30 tests. Every archive is opened with PHP's own `ZipArchive`, because a format
+this old is only correct if the readers agree: order and contents, numbering of
+repeated names, escapes, Unicode names, checksums, ZIP64 hints, timestamps, and
+pushed members against handle-read ones byte for byte.

@@ -337,4 +337,112 @@ final class ArchiveTest extends TestCase {
 
 		$this->assertSame( 'x', $this->open()->getFromName( 'a.txt' ) );
 	}
+
+	/* ─── Pushed members (1.2.0) ────────────────────────────────────── */
+
+	/**
+	 * A body that arrives in pieces — an HTTP response handed over chunk by
+	 * chunk — goes in without a handle.
+	 */
+	public function test_a_pushed_member_reads_back(): void {
+		$zip  = $this->archive();
+		$name = $zip->begin( 'take.wav' );
+
+		foreach ( array( 'one ', '', 'two ', 'three' ) as $chunk ) {
+			$zip->write( $chunk );
+		}
+
+		$entry = $zip->end();
+
+		$zip->add_string( 'readme.txt', 'after' );
+		$zip->finish();
+
+		$this->assertSame( 'take.wav', $name );
+		$this->assertSame( 13, $entry->size );
+		$this->assertSame( (int) hexdec( hash( 'crc32b', 'one two three' ) ), $entry->crc );
+		$this->assertSame( 'one two three', $this->open()->getFromName( 'take.wav' ) );
+		$this->assertSame( 'after', $this->open()->getFromName( 'readme.txt' ) );
+	}
+
+	/**
+	 * Pushing and reading from a handle write the same bytes, so the two
+	 * cannot drift apart.
+	 */
+	public function test_pushing_writes_what_adding_writes(): void {
+		$zip = $this->archive();
+
+		$zip->add( 'a.bin', $this->stream( 'same bytes' ), 1_700_000_000 );
+		$zip->finish();
+
+		$added = $this->bytes;
+		$zip   = $this->archive();
+
+		$zip->begin( 'a.bin', 1_700_000_000 );
+		$zip->write( 'same ' );
+		$zip->write( 'bytes' );
+		$zip->end();
+		$zip->finish();
+
+		$this->assertSame( $added, $this->bytes );
+	}
+
+	public function test_a_pushed_name_is_cleaned_and_numbered_like_any_other(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( 'a.txt', 'first' );
+
+		$this->assertSame( 'a (2).txt', $zip->begin( '../a.txt' ) );
+		$this->assertTrue( $zip->is_open() );
+
+		$zip->end();
+
+		$this->assertFalse( $zip->is_open() );
+	}
+
+	public function test_an_empty_pushed_member_is_still_a_member(): void {
+		$zip = $this->archive();
+
+		$zip->begin( 'empty.txt' );
+		$zip->end();
+		$zip->finish();
+
+		$this->assertSame( '', $this->open()->getFromName( 'empty.txt' ) );
+	}
+
+	public function test_two_members_cannot_be_open_at_once(): void {
+		$zip = $this->archive();
+
+		$zip->begin( 'a.txt' );
+
+		$this->expectException( \LogicException::class );
+
+		$zip->add_string( 'b.txt', 'x' );
+	}
+
+	public function test_writing_with_nothing_open_is_a_programming_error(): void {
+		$this->expectException( \LogicException::class );
+
+		$this->archive()->write( 'x' );
+	}
+
+	public function test_ending_with_nothing_open_is_a_programming_error(): void {
+		$this->expectException( \LogicException::class );
+
+		$this->archive()->end();
+	}
+
+	/**
+	 * A member left open has no descriptor, and a directory written after
+	 * it would point at half a file.
+	 */
+	public function test_finishing_with_a_member_open_is_a_programming_error(): void {
+		$zip = $this->archive();
+
+		$zip->begin( 'a.txt' );
+		$zip->write( 'x' );
+
+		$this->expectException( \LogicException::class );
+
+		$zip->finish();
+	}
 }

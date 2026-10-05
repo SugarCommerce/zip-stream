@@ -80,6 +80,13 @@ final class Archive {
 	private bool $finished = false;
 
 	/**
+	 * The member being written, between begin() and end().
+	 *
+	 * @var array{name: string, time: int, zip64: bool, start: int, crc: \HashContext, size: int}|null
+	 */
+	private ?array $open = null;
+
+	/**
 	 * @since 1.0.0
 	 *
 	 * @param \Closure $sink Receives each chunk of the archive. Printing it
@@ -106,22 +113,7 @@ final class Archive {
 	 * @throws \LogicException When the archive has already been finished.
 	 */
 	public function add( string $name, $handle, ?int $time = null, int $expect = 0 ): Entry {
-		if ( $this->finished ) {
-			throw new \LogicException( 'Cannot add to an archive that has been finished.' );
-		}
-
-		$name  = $this->unused( self::clean( $name ) );
-		$time ??= time();
-
-		// Decided before the header, because it changes the header. A member
-		// declared 32-bit that turns out not to be cannot be rewritten: it
-		// has already been sent.
-		$zip64  = $expect >= self::LIMIT;
-		$start  = $this->offset;
-		$crc    = hash_init( 'crc32b' );
-		$size   = 0;
-
-		$this->write( $this->local_header( $name, $time, $zip64 ) );
+		$this->begin( $name, $time, $expect );
 
 		while ( ! feof( $handle ) ) {
 			$chunk = fread( $handle, self::CHUNK );
@@ -130,26 +122,140 @@ final class Archive {
 				break;
 			}
 
-			hash_update( $crc, $chunk );
-
-			$size += strlen( $chunk );
-
 			$this->write( $chunk );
 		}
 
-		$checksum = (int) hexdec( hash_final( $crc ) );
+		return $this->end();
+	}
+
+	/**
+	 * Start a member whose bytes will be pushed in with write().
+	 *
+	 * For a member that arrives rather than being read: the body of an HTTP
+	 * response handed over chunk by chunk, where there is no handle to give
+	 * add(). Wiring such a body to a handle means a stream wrapper, and PHP's
+	 * cannot be told which address to connect to — so the bytes are pushed
+	 * here from whatever fetched them properly instead.
+	 *
+	 * The header goes out now. Nothing else may be added until end().
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param string   $name   Path inside the archive. Cleaned and, if
+	 *                         already used, numbered — as for add().
+	 * @param int|null $time   Modification time. Null uses the clock.
+	 * @param int      $expect Size if it is known; see add().
+	 *
+	 * @return string The name the member was written under.
+	 *
+	 * @throws \LogicException When the archive has been finished, or another
+	 *                         member is still open.
+	 */
+	public function begin( string $name, ?int $time = null, int $expect = 0 ): string {
+		if ( $this->finished ) {
+			throw new \LogicException( 'Cannot add to an archive that has been finished.' );
+		}
+
+		if ( null !== $this->open ) {
+			throw new \LogicException( 'Cannot begin "' . $name . '" while "' . $this->open['name'] . '" is still open: end() it first.' );
+		}
+
+		$name  = $this->unused( self::clean( $name ) );
+		$time ??= time();
+
+		// Decided before the header, because it changes the header. A member
+		// declared 32-bit that turns out not to be cannot be rewritten: it
+		// has already been sent.
+		$zip64 = $expect >= self::LIMIT;
+
+		$this->open = array(
+			'name'  => $name,
+			'time'  => $time,
+			'zip64' => $zip64,
+			'start' => $this->offset,
+			'crc'   => hash_init( 'crc32b' ),
+			'size'  => 0,
+		);
+
+		$this->emit( $this->local_header( $name, $time, $zip64 ) );
+
+		return $name;
+	}
+
+	/**
+	 * Push some of the open member's bytes.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @param string $bytes The next bytes, in order. Any length; empty is
+	 *                      allowed and changes nothing.
+	 *
+	 * @return void
+	 *
+	 * @throws \LogicException When no member is open.
+	 */
+	public function write( string $bytes ): void {
+		if ( null === $this->open ) {
+			throw new \LogicException( 'No member is open: begin() one first.' );
+		}
+
+		if ( '' === $bytes ) {
+			return;
+		}
+
+		hash_update( $this->open['crc'], $bytes );
+
+		$this->open['size'] += strlen( $bytes );
+
+		$this->emit( $bytes );
+	}
+
+	/**
+	 * Close the open member: its sizes and checksum go out after it.
+	 *
+	 * A member whose source failed partway is still closed properly — the
+	 * archive stays readable, and the member is as long as what arrived.
+	 * Whether that is acceptable is the caller's decision, made with the
+	 * Entry's size in hand.
+	 *
+	 * @since 1.2.0
+	 *
+	 * @return Entry What ended up in the archive.
+	 *
+	 * @throws \LogicException When no member is open.
+	 */
+	public function end(): Entry {
+		if ( null === $this->open ) {
+			throw new \LogicException( 'No member is open to end.' );
+		}
+
+		[ 'name' => $name, 'time' => $time, 'zip64' => $zip64, 'start' => $start, 'crc' => $crc, 'size' => $size ] = $this->open;
+
+		$this->open = null;
+		$checksum   = (int) hexdec( hash_final( $crc ) );
 
 		// A member that outgrew its header. The descriptor can carry the
 		// larger numbers even when the header did not, and the central
 		// directory is what readers actually trust.
 		$zip64 = $zip64 || $size >= self::LIMIT;
 
-		$this->write( $this->descriptor( $checksum, $size, $zip64 ) );
+		$this->emit( $this->descriptor( $checksum, $size, $zip64 ) );
 
 		$entry           = new Entry( $name, $checksum, $size, $start, $time, $zip64 );
 		$this->entries[] = $entry;
 
 		return $entry;
+	}
+
+	/**
+	 * Whether a member is open between begin() and end().
+	 *
+	 * @since 1.2.0
+	 *
+	 * @return bool
+	 */
+	public function is_open(): bool {
+		return null !== $this->open;
 	}
 
 	/**
@@ -189,20 +295,28 @@ final class Archive {
 	 * @since 1.0.0
 	 *
 	 * @return int Total bytes written.
+	 *
+	 * @throws \LogicException When a member begun with begin() was not ended:
+	 *                         its descriptor would be missing, and a reader
+	 *                         would find a directory pointing at half a file.
 	 */
 	public function finish(): int {
 		if ( $this->finished ) {
 			return $this->offset;
 		}
 
+		if ( null !== $this->open ) {
+			throw new \LogicException( 'Cannot finish while "' . $this->open['name'] . '" is still open: end() it first.' );
+		}
+
 		$this->finished = true;
 		$start          = $this->offset;
 
 		foreach ( $this->entries as $entry ) {
-			$this->write( $this->central( $entry ) );
+			$this->emit( $this->central( $entry ) );
 		}
 
-		$this->write( $this->end( $start, $this->offset - $start ) );
+		$this->emit( $this->directory_end( $start, $this->offset - $start ) );
 
 		return $this->offset;
 	}
@@ -225,7 +339,7 @@ final class Archive {
 	 *
 	 * @return void
 	 */
-	private function write( string $bytes ): void {
+	private function emit( string $bytes ): void {
 		$this->offset += strlen( $bytes );
 
 		( $this->sink )( $bytes );
@@ -337,7 +451,7 @@ final class Archive {
 	 *
 	 * @return string
 	 */
-	private function end( int $start, int $size ): string {
+	private function directory_end( int $start, int $size ): string {
 		$count = count( $this->entries );
 		$big   = $count >= 0xFFFF || $start >= self::LIMIT || $size >= self::LIMIT;
 		$out   = '';
