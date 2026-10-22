@@ -44,7 +44,7 @@ final class Archive {
 	/**
 	 * The point at which a 32-bit field can no longer hold the answer.
 	 */
-	private const LIMIT = 0xFFFFFFFF;
+	private const int LIMIT = 0xFFFFFFFF;
 
 	/**
 	 * How much to move at a time.
@@ -53,12 +53,33 @@ final class Archive {
 	 * worker holding several of these at once is not the reason a box runs
 	 * out of memory.
 	 */
-	private const CHUNK = 262144; // 256 KiB.
+	private const int CHUNK = 262144; // 256 KiB.
+
+	/**
+	 * The longest name written, in bytes.
+	 *
+	 * The field that holds a name's length is sixteen bits. A longer name
+	 * would not just be cut off — its excess would be read as the bytes that
+	 * follow it, which is a way to plant headers of one's own. The margin
+	 * leaves room for the number unused() may append.
+	 */
+	private const int NAME_BYTES = 0xFFFF - 32;
+
+	/**
+	 * The latest time the format can hold: the last day of 2107, with a day
+	 * to spare for any time zone. Later years overflow the seven-bit field.
+	 */
+	private const int LATEST = 4354732800;
+
+	/**
+	 * What a member is called when nothing is left of its name.
+	 */
+	private const string UNNAMED = 'unnamed';
 
 	/**
 	 * Members written so far.
 	 *
-	 * @var Entry[]
+	 * @var list<Entry>
 	 */
 	private array $entries = array();
 
@@ -87,6 +108,8 @@ final class Archive {
 	private ?array $open = null;
 
 	/**
+	 * An archive that sends itself to a sink as it is built.
+	 *
 	 * @since 1.0.0
 	 *
 	 * @param \Closure $sink Receives each chunk of the archive. Printing it
@@ -110,9 +133,18 @@ final class Archive {
 	 *
 	 * @return Entry What ended up in the archive.
 	 *
-	 * @throws \LogicException When the archive has already been finished.
+	 * @throws \InvalidArgumentException When $handle is not an open stream;
+	 *                                   nothing has been written.
+	 * @throws \LogicException           When the archive has already been
+	 *                                   finished.
 	 */
 	public function add( string $name, $handle, ?int $time = null, int $expect = 0 ): Entry {
+		// Checked before the header goes out, so a bad handle cannot leave a
+		// member begun that nothing will end.
+		if ( ! is_resource( $handle ) || 'stream' !== get_resource_type( $handle ) ) {
+			throw new \InvalidArgumentException( 'A member is read from an open stream.' );
+		}
+
 		$this->begin( $name, $time, $expect );
 
 		while ( ! feof( $handle ) ) {
@@ -272,9 +304,16 @@ final class Archive {
 	 * @param int|null $time     Modification time. Null uses the clock.
 	 *
 	 * @return Entry
+	 *
+	 * @throws \RuntimeException When a memory stream cannot be opened.
+	 * @throws \LogicException   When the archive has already been finished.
 	 */
 	public function add_string( string $name, string $contents, ?int $time = null ): Entry {
 		$handle = fopen( 'php://memory', 'r+' );
+
+		if ( false === $handle ) {
+			throw new \RuntimeException( 'A memory stream could not be opened.' );
+		}
 
 		fwrite( $handle, $contents );
 		rewind( $handle );
@@ -487,15 +526,16 @@ final class Archive {
 	/**
 	 * A timestamp in the format the archive uses.
 	 *
-	 * MS-DOS, from 1980, in local time with two-second resolution. Not a
-	 * choice — it is what the field is.
+	 * MS-DOS, from 1980 to 2107, in local time with two-second resolution.
+	 * Not a choice — it is what the field is. A time outside that is
+	 * clamped rather than overflowing into the next field.
 	 *
 	 * @param int $time Unix timestamp.
 	 *
 	 * @return string Four bytes: time then date.
 	 */
 	private static function dos_time( int $time ): string {
-		$parts = getdate( max( $time, 315532800 ) ); // 1980-01-01, the epoch of the format.
+		$parts = getdate( min( max( $time, 315532800 ), self::LATEST ) ); // 1980-01-01, the epoch of the format.
 
 		return pack(
 			'vv',
@@ -547,21 +587,32 @@ final class Archive {
 	 * An entry called `../../etc/cron.d/x` is a real attack on anything that
 	 * extracts without checking, and plenty does. Backslashes go too: a
 	 * Windows reader treats them as separators, so they are a second way to
-	 * write the same escape.
+	 * write the same escape. So does a drive (`C:/`, `C:`), and any segment
+	 * made only of dots and spaces — Windows drops trailing dots and spaces
+	 * from each part of a path, so `.. ` and `...` are `..` once extracted
+	 * there.
+	 *
+	 * The name is also made safe to show: valid UTF-8 (the archive says it
+	 * is), with no control characters and no direction overrides, which
+	 * make `txt.exe` display as `exe.txt`. It is cut to a length the
+	 * format can record, and a name with nothing left becomes `unnamed`.
 	 *
 	 * @param string $name Submitted name.
 	 *
 	 * @return string
 	 */
 	private static function clean( string $name ): string {
-		$name = str_replace( array( '\\', "\0" ), array( '/', '' ), $name );
-		$name = ltrim( $name, '/' );
+		$name = (string) preg_replace( '/[\x00-\x1F\x7F]|[\x{202A}-\x{202E}\x{2066}-\x{2069}]/u', '', mb_scrub( $name, 'UTF-8' ) );
+		$name = str_replace( '\\', '/', $name );
+		$name = (string) preg_replace( '#^[A-Za-z]:#', '', $name );
 
 		$parts = array_filter(
 			explode( '/', $name ),
-			static fn( string $part ): bool => '' !== $part && '.' !== $part && '..' !== $part
+			static fn( string $part ): bool => '' !== trim( $part, ' .' )
 		);
 
-		return implode( '/', $parts );
+		$name = rtrim( mb_strcut( implode( '/', $parts ), 0, self::NAME_BYTES, 'UTF-8' ), '/' );
+
+		return '' === $name ? self::UNNAMED : $name;
 	}
 }

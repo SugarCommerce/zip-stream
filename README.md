@@ -83,10 +83,17 @@ readers actually trust.
 ## Names
 
 Anything that could escape the archive is removed: `..` segments, leading
-slashes, null bytes, and backslashes — a Windows reader treats those as
-separators, so they are a second way to write the same escape. An entry called
-`../../etc/cron.d/x` is a real attack on anything that extracts without
+slashes, drives (`C:\`), and backslashes — a Windows reader treats those as
+separators, so they are a second way to write the same escape. So is any
+segment made only of dots and spaces, because Windows drops trailing dots and
+spaces from each part of a path: `.. ` is `..` once extracted there. An entry
+called `../../etc/cron.d/x` is a real attack on anything that extracts without
 checking, and plenty does.
+
+Names are also made safe to show: invalid UTF-8 is repaired, and control
+characters and direction overrides (which make `txt.exe` display as
+`exe.txt`) are taken out. A name is cut to what the format's sixteen-bit length
+field can hold, and one with nothing left is called `unnamed`.
 
 Names are written as UTF-8 with the flag that says so, so `Café — Master.wav`
 survives the round trip.
@@ -101,8 +108,8 @@ file. `add()` returns the Entry, whose `name` is what was actually written.
 
 The format stores local wall-clock time with no zone, from MS-DOS, with
 two-second resolution. That is not a choice — it is what the field is. Anything
-before 1980 is clamped, because a negative year produces an archive that will
-not open.
+before 1980 or after 2107 is clamped, because a year outside those overflows
+the field and produces an archive that will not open, or opens wrong.
 
 ## Testing
 
@@ -111,7 +118,7 @@ composer install
 composer test
 ```
 
-30 tests. Every archive is opened with PHP's own `ZipArchive`, because a format
+36 tests. Every archive is opened with PHP's own `ZipArchive`, because a format
 this old is only correct if the readers agree: order and contents, numbering of
 repeated names, escapes, Unicode names, checksums, ZIP64 hints, timestamps, and
 pushed members against handle-read ones byte for byte.

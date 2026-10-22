@@ -25,6 +25,8 @@ namespace SugarCommerce\ZipStream;
 final readonly class Entry {
 
 	/**
+	 * A member as it was written.
+	 *
 	 * @since 1.0.0
 	 *
 	 * @param string $name   Path inside the archive.

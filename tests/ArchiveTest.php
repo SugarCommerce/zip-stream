@@ -221,6 +221,93 @@ final class ArchiveTest extends TestCase {
 		$this->assertSame( 'windows/system32/z.txt', $opened->getNameIndex( 2 ) );
 	}
 
+	/**
+	 * Windows drops trailing dots and spaces from each part of a path, so
+	 * `.. ` and `...` are `..` once extracted there; a drive makes a name
+	 * absolute.
+	 */
+	public function test_a_name_cannot_escape_the_archive_on_windows(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( '.. /.. /a.txt', '1' );
+		$zip->add_string( '...\\....\\b.txt', '2' );
+		$zip->add_string( 'C:\\Windows\\c.dll', '3' );
+		$zip->add_string( 'D:d.txt', '4' );
+		$zip->add_string( '//server/share/e.txt', '5' );
+		$zip->finish();
+
+		$opened = $this->open();
+
+		$this->assertSame( 'a.txt', $opened->getNameIndex( 0 ) );
+		$this->assertSame( 'b.txt', $opened->getNameIndex( 1 ) );
+		$this->assertSame( 'Windows/c.dll', $opened->getNameIndex( 2 ) );
+		$this->assertSame( 'd.txt', $opened->getNameIndex( 3 ) );
+		$this->assertSame( 'server/share/e.txt', $opened->getNameIndex( 4 ) );
+	}
+
+	/**
+	 * A name is shown to whoever opens the archive: an override makes
+	 * `txt.exe` display as `exe.txt`, and the archive declares UTF-8.
+	 */
+	public function test_a_name_is_safe_to_show(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( "notes\n\u{202E}txt.exe", 'x' );
+		$zip->add_string( "caf\xE9.txt", 'y' );
+		$zip->finish();
+
+		$opened = $this->open();
+
+		$this->assertSame( 'notestxt.exe', $opened->getNameIndex( 0 ) );
+		$this->assertTrue( mb_check_encoding( (string) $opened->getNameIndex( 1 ), 'UTF-8' ) );
+		$this->assertSame( 'y', $opened->getFromIndex( 1 ) );
+	}
+
+	public function test_a_name_with_nothing_left_is_still_a_name(): void {
+		$zip = $this->archive();
+
+		$this->assertSame( 'unnamed', $zip->add_string( '../..', 'x' )->name );
+		$this->assertSame( 'unnamed (2)', $zip->add_string( '', 'y' )->name );
+		$zip->finish();
+
+		$this->assertSame( 'y', $this->open()->getFromName( 'unnamed (2)' ) );
+	}
+
+	/**
+	 * The length of a name is a sixteen-bit field. A longer one used to
+	 * wrap, and the rest of the name was read as what followed it.
+	 */
+	public function test_a_name_too_long_for_the_format_is_cut(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( str_repeat( 'é', 40_000 ) . '.txt', 'long' );
+		$zip->add_string( 'after.txt', 'after' );
+		$zip->finish();
+
+		$opened = $this->open();
+
+		$this->assertLessThanOrEqual( 0xFFFF, strlen( (string) $opened->getNameIndex( 0 ) ) );
+		$this->assertTrue( mb_check_encoding( (string) $opened->getNameIndex( 0 ), 'UTF-8' ) );
+		$this->assertSame( 'long', $opened->getFromIndex( 0 ) );
+		$this->assertSame( 'after', $opened->getFromName( 'after.txt' ) );
+	}
+
+	/**
+	 * Nothing has been written when the handle is refused, so the archive is
+	 * not left with a member begun that nothing will end.
+	 */
+	public function test_a_handle_that_is_not_a_stream_is_refused_before_writing(): void {
+		$zip = $this->archive();
+
+		try {
+			$zip->add( 'a.txt', 'not a handle' );
+			$this->fail( 'A string is not a stream.' );
+		} catch ( \InvalidArgumentException ) {
+			$this->assertSame( 0, $zip->written() );
+			$this->assertFalse( $zip->is_open() );
+		}
+	}
+
 	public function test_a_null_byte_is_stripped_from_a_name(): void {
 		$zip = $this->archive();
 
@@ -336,6 +423,22 @@ final class ArchiveTest extends TestCase {
 		$zip->finish();
 
 		$this->assertSame( 'x', $this->open()->getFromName( 'a.txt' ) );
+	}
+
+	/**
+	 * The year field is seven bits from 1980; 2108 and later overflowed into
+	 * the month.
+	 */
+	public function test_a_far_future_date_is_clamped_rather_than_corrupting(): void {
+		$zip = $this->archive();
+
+		$zip->add_string( 'a.txt', 'x', mktime( 12, 0, 0, 6, 15, 2200 ) );
+		$zip->finish();
+
+		$date = unpack( 'vdate', substr( $this->bytes, 12, 2 ) )['date'];
+
+		$this->assertSame( 2107, ( ( $date >> 9 ) & 0x7F ) + 1980 );
+		$this->assertSame( 12, ( $date >> 5 ) & 0x0F );
 	}
 
 	/* ─── Pushed members (1.2.0) ────────────────────────────────────── */
